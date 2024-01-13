@@ -1,0 +1,9 @@
+[package]
+name = "hierarchy-free-study"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+valley-free = {git = "https://github.com/guissalustiano/valley-free", branch = "fix/provider_direction_order"}
