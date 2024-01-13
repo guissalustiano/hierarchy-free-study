@@ -7,4 +7,5 @@ edition = "2021"
 
 [dependencies]
 once_cell = "1.19.0"
+rayon = "1.8.0"
 valley-free = {git = "https://github.com/guissalustiano/valley-free", branch = "fix/provider_direction_order"}

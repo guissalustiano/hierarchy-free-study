@@ -1,4 +1,7 @@
 use once_cell::sync::Lazy;
+use rayon::prelude::*;
+use std::sync::mpsc;
+use std::thread;
 use std::{
     collections::HashSet,
     fs::File,
@@ -118,19 +121,27 @@ fn count_hierachy_free_paths(topo: &Topology, asn: u32) -> DataRecord {
 }
 
 fn main() {
-    let all_asns = TOPOLOGY.ases_map.keys().copied();
-    let all_asns_count = all_asns.clone().count();
+    let all_asns: Vec<_> = TOPOLOGY.ases_map.keys().copied().collect();
+    let all_asns_count = all_asns.len();
 
-    let file = File::create("data.csv").unwrap();
-    let mut writter = BufWriter::new(file);
+    let (tx, rx) = mpsc::channel::<String>();
 
-    writter
-        .write_all(b"asn,type,provider_free,tier1_free,hierachy_free,total\n")
-        .unwrap();
+    thread::spawn(move || {
+        let file = File::create("data.csv").unwrap();
+        let mut writter = BufWriter::new(file);
+
+        writter
+            .write_all(b"asn,type,provider_free,tier1_free,hierachy_free,total\n")
+            .unwrap();
+
+        for buf in rx.iter() {
+            writter.write_all(buf.as_bytes()).unwrap();
+        }
+    });
 
     all_asns
-        .take(10000)
-        .map(|asn| count_hierachy_free_paths(&TOPOLOGY, asn))
+        .par_iter()
+        .map(|asn| count_hierachy_free_paths(&TOPOLOGY, *asn))
         .for_each(|record| {
             let line = format!(
                 "{},{},{},{},{},{}\n",
@@ -142,6 +153,6 @@ fn main() {
                 all_asns_count,
             );
 
-            writter.write_all(line.as_bytes()).unwrap();
+            tx.send(line).unwrap();
         });
 }
