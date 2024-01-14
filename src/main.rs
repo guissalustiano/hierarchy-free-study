@@ -1,13 +1,15 @@
+use log::{debug, trace};
 use once_cell::sync::Lazy;
+use petgraph::visit::{Bfs, Walker};
 use rayon::prelude::*;
 use std::sync::mpsc;
 use std::thread;
 use std::{
     collections::HashSet,
     fs::File,
-    io::{BufReader, BufWriter, Write},
+    io::{BufWriter, Write},
 };
-use valley_free::*;
+use valley_free_graph::*;
 
 static TIER1_ASNS: [u32; 15] = [
     7018, 3320, 3257, 6830, 3356, 2914, 5511, 3491, 1239, 6453, 6762, 1299, 12956, 701, 6461,
@@ -28,21 +30,10 @@ static CLOUD_PROVIDERS: [u32; 6] = [
     16509, // Amazon Cloud
 ];
 
-static TOPOLOGY: Lazy<Topology> = Lazy::new(|| {
-    let mut topo = Topology::new();
+static BASE_TOPOLOGY: Lazy<Topology> = Lazy::new(|| {
     let file = File::open("20231201.as-rel.txt").unwrap();
-    let reader = BufReader::new(file);
-
-    topo.build_topology(reader).unwrap();
-    topo
+    Topology::from_caida(file).unwrap()
 });
-
-fn propagate_paths(asn: u32) -> Vec<Path> {
-    let mut all_paths = vec![];
-    let mut seen = HashSet::new();
-    TOPOLOGY.propagate_paths(&mut all_paths, asn, Direction::UP, vec![], &mut seen);
-    all_paths
-}
 
 struct DataRecord {
     asn: u32,
@@ -83,33 +74,61 @@ fn classify_asn(asn: u32) -> AsType {
 }
 
 fn count_hierachy_free_paths(topo: &Topology, asn: u32) -> DataRecord {
-    let autonomo_system = topo.ases_map.get(&asn).unwrap();
-    let providers: HashSet<_> = autonomo_system
-        .providers
-        .iter()
-        .copied()
+    debug!("Transform to paths graph");
+    let topo = topo.paths_graph(asn);
+
+    let count_reachable_nodes = |topo: &Topology, start: u32| {
+        let start_idx = topo.index_of(start).unwrap();
+        Bfs::new(topo.raw_graph(), start_idx)
+            .iter(topo.raw_graph())
+            .collect::<HashSet<_>>()
+            .len()
+    };
+
+    let providers: HashSet<_> = topo
+        .providers_of(asn)
+        .unwrap()
+        .into_iter()
         .filter(|&x| x != asn)
         .collect();
 
-    let tiers1: HashSet<_> = TIER1_ASNS.iter().copied().filter(|&x| x != asn).collect();
-    let tiers2: HashSet<_> = TIER2_ASNS.iter().copied().filter(|&x| x != asn).collect();
+    let tiers1: HashSet<_> = TIER1_ASNS.into_iter().filter(|&x| x != asn).collect();
+    let tiers2: HashSet<_> = TIER2_ASNS.into_iter().filter(|&x| x != asn).collect();
 
-    let all_paths = propagate_paths(asn);
-    let provider_free = all_paths
-        .iter()
-        .filter(|path| !providers.iter().any(|&provider| path.contains(&provider)));
+    debug!("Counting provider free paths");
+    let mut topo = topo.paths_graph(asn);
+    // Remove providers
+    providers.iter().for_each(|&provider| {
+        if let None = topo.index_of(provider).map(|provider_idx| {
+            topo.raw_graph_mut().remove_node(provider_idx);
+        }) {
+            trace!("Provider {} not found in {}", provider, asn);
+        }
+    });
 
-    let provider_free_count = provider_free.clone().count();
+    let provider_free_count = count_reachable_nodes(&topo, asn);
 
-    let tier1_free =
-        provider_free.filter(|path| !tiers1.iter().any(|&tier1| path.contains(&tier1)));
+    debug!("Counting tier1 free paths");
+    // Remove tier1
+    tiers1.iter().for_each(|&tier1| {
+        if let None = topo.index_of(tier1).map(|tier1_idx| {
+            topo.raw_graph_mut().remove_node(tier1_idx);
+        }) {
+            trace!("Tier1 {} not found in {}", tier1, asn);
+        }
+    });
+    let tier1_free_count = count_reachable_nodes(&topo, asn);
 
-    let tier1_free_count = tier1_free.clone().count();
-
-    let hierachy_free =
-        tier1_free.filter(|path| !tiers2.iter().any(|&tier2| path.contains(&tier2)));
-
-    let hierachy_free_count = hierachy_free.count();
+    debug!("Counting hierachy free paths");
+    // Remove tier2
+    tiers2.iter().for_each(|&tier2| {
+        if let None = topo.index_of(tier2).map(|tier2_idx| {
+            topo.raw_graph_mut().remove_node(tier2_idx);
+        }) {
+            trace!("Tier2 {} not found in {}", tier2, asn);
+        }
+    });
+    let hierachy_free_count = count_reachable_nodes(&topo, asn);
 
     DataRecord {
         asn,
@@ -121,7 +140,8 @@ fn count_hierachy_free_paths(topo: &Topology, asn: u32) -> DataRecord {
 }
 
 fn main() {
-    let all_asns: Vec<_> = TOPOLOGY.ases_map.keys().copied().collect();
+    env_logger::init();
+    let all_asns = BASE_TOPOLOGY.all_asns();
     let all_asns_count = all_asns.len();
 
     let (tx, rx) = mpsc::channel::<String>();
@@ -137,11 +157,20 @@ fn main() {
         for buf in rx.iter() {
             writter.write_all(buf.as_bytes()).unwrap();
         }
+
+        writter.flush().unwrap();
     });
 
+    /*
+    let all_asns: HashSet<_> = CLOUD_PROVIDERS
+        .into_par_iter()
+        .chain(TIER1_ASNS.into_iter())
+        .collect();
+    */
+
     all_asns
-        .par_iter()
-        .map(|asn| count_hierachy_free_paths(&TOPOLOGY, *asn))
+        .into_par_iter()
+        .map(|asn| count_hierachy_free_paths(&BASE_TOPOLOGY, asn))
         .for_each(|record| {
             let line = format!(
                 "{},{},{},{},{},{}\n",
