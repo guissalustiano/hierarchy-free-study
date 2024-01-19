@@ -1,4 +1,4 @@
-use log::{debug, trace};
+use log::{debug, info, trace};
 use once_cell::sync::Lazy;
 use petgraph::visit::{Bfs, Walker};
 use rayon::prelude::*;
@@ -9,7 +9,7 @@ use std::{
     fs::File,
     io::{BufWriter, Write},
 };
-use valley_free_graph::*;
+use valley_free::*;
 
 static TIER1_ASNS: [u32; 15] = [
     7018, 3320, 3257, 6830, 3356, 2914, 5511, 3491, 1239, 6453, 6762, 1299, 12956, 701, 6461,
@@ -31,8 +31,8 @@ static CLOUD_PROVIDERS: [u32; 6] = [
 ];
 
 static BASE_TOPOLOGY: Lazy<Topology> = Lazy::new(|| {
-    let file = File::open("20231201.as-rel.txt").unwrap();
-    Topology::from_caida(file).unwrap()
+    let file = std::include_bytes!("../20231201.as-rel.txt");
+    Topology::from_caida(&file[..]).unwrap()
 });
 
 struct DataRecord {
@@ -74,13 +74,13 @@ fn classify_asn(asn: u32) -> AsType {
 }
 
 fn count_hierachy_free_paths(topo: &Topology, asn: u32) -> DataRecord {
-    debug!("Transform to paths graph");
-    let topo = topo.paths_graph(asn);
+    let mut topo = topo.clone();
+    info!("---------- {asn} ----------");
 
     let count_reachable_nodes = |topo: &Topology, start: u32| {
         let start_idx = topo.index_of(start).unwrap();
-        Bfs::new(topo.raw_graph(), start_idx)
-            .iter(topo.raw_graph())
+        Bfs::new(&topo.graph, start_idx)
+            .iter(&topo.graph)
             .collect::<HashSet<_>>()
             .len()
     };
@@ -95,40 +95,46 @@ fn count_hierachy_free_paths(topo: &Topology, asn: u32) -> DataRecord {
     let tiers1: HashSet<_> = TIER1_ASNS.into_iter().filter(|&x| x != asn).collect();
     let tiers2: HashSet<_> = TIER2_ASNS.into_iter().filter(|&x| x != asn).collect();
 
-    debug!("Counting provider free paths");
-    let mut topo = topo.paths_graph(asn);
-    // Remove providers
+    debug!("Remove providers");
     providers.iter().for_each(|&provider| {
         if let None = topo.index_of(provider).map(|provider_idx| {
-            topo.raw_graph_mut().remove_node(provider_idx);
+            topo.graph.remove_node(provider_idx);
         }) {
             trace!("Provider {} not found in {}", provider, asn);
         }
     });
 
+    debug!("Transform to paths graph withouth providers");
+    let mut topo = topo.paths_graph(asn);
     let provider_free_count = count_reachable_nodes(&topo, asn);
+    info!("Provider free graph has {} nodes", provider_free_count);
 
-    debug!("Counting tier1 free paths");
-    // Remove tier1
+    debug!("Remove tier1");
     tiers1.iter().for_each(|&tier1| {
         if let None = topo.index_of(tier1).map(|tier1_idx| {
-            topo.raw_graph_mut().remove_node(tier1_idx);
+            topo.graph.remove_node(tier1_idx);
         }) {
             trace!("Tier1 {} not found in {}", tier1, asn);
         }
     });
-    let tier1_free_count = count_reachable_nodes(&topo, asn);
 
-    debug!("Counting hierachy free paths");
-    // Remove tier2
+    debug!("Transform to paths graph withouth tier1 and providers");
+    let mut topo = topo.paths_graph(asn);
+    let tier1_free_count = count_reachable_nodes(&topo, asn);
+    info!("Tier1 free graph has {} nodes", tier1_free_count);
+
+    debug!("Remove tier2");
     tiers2.iter().for_each(|&tier2| {
         if let None = topo.index_of(tier2).map(|tier2_idx| {
-            topo.raw_graph_mut().remove_node(tier2_idx);
+            topo.graph.remove_node(tier2_idx);
         }) {
             trace!("Tier2 {} not found in {}", tier2, asn);
         }
     });
+    debug!("Transform to paths graph withouth tier1, tier2 and providers");
+    let topo = topo.paths_graph(asn);
     let hierachy_free_count = count_reachable_nodes(&topo, asn);
+    info!("Hierachy free graph has {} nodes", hierachy_free_count);
 
     DataRecord {
         asn,
@@ -160,13 +166,6 @@ fn main() {
 
         writter.flush().unwrap();
     });
-
-    /*
-    let all_asns: HashSet<_> = CLOUD_PROVIDERS
-        .into_par_iter()
-        .chain(TIER1_ASNS.into_iter())
-        .collect();
-    */
 
     all_asns
         .into_par_iter()
