@@ -1,6 +1,5 @@
 use log::{debug, info, trace};
 use once_cell::sync::Lazy;
-use petgraph::visit::{Bfs, Walker};
 use rayon::prelude::*;
 use std::sync::mpsc;
 use std::thread;
@@ -22,18 +21,13 @@ static TIER2_ASNS: [u32; 32] = [
 ];
 
 static CLOUD_PROVIDERS: [u32; 6] = [
+    12076, // Microsoft (Azure)
     36351, // IBM
     19604, // IBM Cloud
     15169, // Google
     8075,  // Microsoft (Not azure)
-    12076, // Microsoft (Azure)
     16509, // Amazon Cloud
 ];
-
-static BASE_TOPOLOGY: Lazy<Topology> = Lazy::new(|| {
-    let file = std::include_bytes!("../20231201.as-rel.txt");
-    Topology::from_caida(&file[..]).unwrap()
-});
 
 struct DataRecord {
     asn: u32,
@@ -77,14 +71,6 @@ fn count_hierachy_free_paths(topo: &Topology, asn: u32) -> DataRecord {
     let mut topo = topo.clone();
     info!("---------- {asn} ----------");
 
-    let count_reachable_nodes = |topo: &Topology, start: u32| {
-        let start_idx = topo.index_of(start).unwrap();
-        Bfs::new(&topo.graph, start_idx)
-            .iter(&topo.graph)
-            .collect::<HashSet<_>>()
-            .len()
-    };
-
     let providers: HashSet<_> = topo
         .providers_of(asn)
         .unwrap()
@@ -97,43 +83,42 @@ fn count_hierachy_free_paths(topo: &Topology, asn: u32) -> DataRecord {
 
     debug!("Remove providers");
     providers.iter().for_each(|&provider| {
-        if let None = topo.index_of(provider).map(|provider_idx| {
+        topo.index_of(provider).map(|provider_idx| {
             topo.graph.remove_node(provider_idx);
-        }) {
-            trace!("Provider {} not found in {}", provider, asn);
-        }
+        });
     });
 
+    info!(
+        "Without providers graph has {} nodes",
+        topo.graph.node_count()
+    );
+
     debug!("Transform to paths graph withouth providers");
-    let mut topo = topo.paths_graph(asn);
-    let provider_free_count = count_reachable_nodes(&topo, asn);
+    let mut topo: Topology = topo.valley_free_of(asn).into();
+    let provider_free_count = topo.graph.node_count();
     info!("Provider free graph has {} nodes", provider_free_count);
 
     debug!("Remove tier1");
     tiers1.iter().for_each(|&tier1| {
-        if let None = topo.index_of(tier1).map(|tier1_idx| {
+        topo.index_of(tier1).map(|tier1_idx| {
             topo.graph.remove_node(tier1_idx);
-        }) {
-            trace!("Tier1 {} not found in {}", tier1, asn);
-        }
+        });
     });
 
     debug!("Transform to paths graph withouth tier1 and providers");
-    let mut topo = topo.paths_graph(asn);
-    let tier1_free_count = count_reachable_nodes(&topo, asn);
+    let mut topo: Topology = topo.valley_free_of(asn).into();
+    let tier1_free_count = topo.graph.node_count();
     info!("Tier1 free graph has {} nodes", tier1_free_count);
 
     debug!("Remove tier2");
     tiers2.iter().for_each(|&tier2| {
-        if let None = topo.index_of(tier2).map(|tier2_idx| {
+        topo.index_of(tier2).map(|tier2_idx| {
             topo.graph.remove_node(tier2_idx);
-        }) {
-            trace!("Tier2 {} not found in {}", tier2, asn);
-        }
+        });
     });
     debug!("Transform to paths graph withouth tier1, tier2 and providers");
-    let topo = topo.paths_graph(asn);
-    let hierachy_free_count = count_reachable_nodes(&topo, asn);
+    let mut topo: Topology = topo.valley_free_of(asn).into();
+    let hierachy_free_count = topo.graph.node_count();
     info!("Hierachy free graph has {} nodes", hierachy_free_count);
 
     DataRecord {
@@ -147,18 +132,23 @@ fn count_hierachy_free_paths(topo: &Topology, asn: u32) -> DataRecord {
 
 fn main() {
     env_logger::init();
-    let all_asns = BASE_TOPOLOGY.all_asns();
+
+    let file = std::include_bytes!("../20231201.as-rel2.txt");
+    let base_topology = Topology::from_caida(&file[..]).unwrap();
+
+    let all_asns = base_topology.all_asns();
     let all_asns_count = all_asns.len();
 
     let (tx, rx) = mpsc::channel::<String>();
 
     thread::spawn(move || {
-        let file = File::create("data.csv").unwrap();
+        let file = File::create("data_2023.csv").unwrap();
         let mut writter = BufWriter::new(file);
 
         writter
             .write_all(b"asn,type,provider_free,tier1_free,hierachy_free,total\n")
             .unwrap();
+        writter.flush().unwrap();
 
         for buf in rx.iter() {
             writter.write_all(buf.as_bytes()).unwrap();
@@ -167,9 +157,16 @@ fn main() {
         writter.flush().unwrap();
     });
 
+    let all_asns = CLOUD_PROVIDERS
+        .iter()
+        .chain(TIER1_ASNS.iter())
+        .chain(TIER2_ASNS.iter())
+        .copied()
+        .collect::<Vec<_>>();
+
     all_asns
         .into_par_iter()
-        .map(|asn| count_hierachy_free_paths(&BASE_TOPOLOGY, asn))
+        .map(|asn| count_hierachy_free_paths(&base_topology, asn))
         .for_each(|record| {
             let line = format!(
                 "{},{},{},{},{},{}\n",
