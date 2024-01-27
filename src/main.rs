@@ -73,10 +73,20 @@ fn count_hierachy_free_paths(topo: &Topology, asn: u32) -> DataRecord {
 
     let providers: HashSet<_> = topo
         .providers_of(asn)
-        .unwrap()
+        .unwrap_or([].into())
         .into_iter()
         .filter(|&x| x != asn)
         .collect();
+
+    if providers.is_empty() {
+        return DataRecord {
+            asn,
+            provider_free: 0,
+            tier1_free: 0,
+            hierachy_free: 0,
+            type_: classify_asn(asn),
+        };
+    }
 
     let tiers1: HashSet<_> = TIER1_ASNS.into_iter().filter(|&x| x != asn).collect();
     let tiers2: HashSet<_> = TIER2_ASNS.into_iter().filter(|&x| x != asn).collect();
@@ -133,7 +143,7 @@ fn count_hierachy_free_paths(topo: &Topology, asn: u32) -> DataRecord {
 fn main() {
     env_logger::init();
 
-    let file = std::include_bytes!("../20231201.as-rel2.txt");
+    let file = std::include_bytes!("../20151201.as-rel2.txt");
     let base_topology = Topology::from_caida(&file[..]).unwrap();
 
     let all_asns = base_topology.all_asns();
@@ -142,11 +152,11 @@ fn main() {
     let (tx, rx) = mpsc::channel::<String>();
 
     thread::spawn(move || {
-        let file = File::create("data_2023.csv").unwrap();
+        let file = File::create("data_2015.csv").unwrap();
         let mut writter = BufWriter::new(file);
 
         writter
-            .write_all(b"asn,type,provider_free,tier1_free,hierachy_free,total\n")
+            .write_all(b"asn,type,provider_free,tier1_free,hierarchy_free,total\n")
             .unwrap();
         writter.flush().unwrap();
 
